@@ -1,10 +1,10 @@
-function [objGMM, M, varargout] = fitGMMarkov(data,tVec,varargin)
+function [mu, sigma, wdist, M, varargout] = fitGMMarkov(data,tVec,varargin)
 % fitGMMarkov.m - Mixture of Gaussians Markov Chain Self-supervised Fit
 % 
 % Given a 1d vector of data and time, a GMM-Markov process model is fit for
 % forecasting measured data. The EM algorithm clusters the data into
 % respective Gaussian models, the number of which can be determined via
-% iterative computation of the Akaike information criterion with
+% iterative computation (greedy) of the Akaike information criterion with
 % incremental number of clusters. The data vector is sorted into clusters
 % respectively via MAP decision and the transition probabilities are
 % computed over time.
@@ -35,10 +35,17 @@ aicFit = 0; dt_forcast = 0; numGMM = 0;
 disp_AIC = 0;   disp_GMMixture = 0;
 disp_Compare = 0;   disp_Markov = 0;
 
-% Defualt Expectation-Maximization Parameters
+% Determine if Statistics Toolbox is installed
+try
+    gmdistribution.fit([1;2;3],1);
+    builtInFit = 1;
+catch noPackage
+    builtInFit = 0;
+end
+
+% Default Expectation-Maximization Parameters
 Ngmm_max = 25;      % Maxmimum number of distributions for AIC fit
 Ngmm_reinit = 3;    % Number of reinitilization of EM algorithm
-options = statset('MaxIter',250);
 
 if isvector(data) ~= 1 || isvector(tVec) ~= 1,
     error('er:vector','Data or time not arrays');
@@ -116,33 +123,56 @@ end
 switch aicFit,
     case 0,
         % Prespecified number of GM models
-        for  j = 1:Ngmm_reinit,     % EM is nonconvex, reinitialize problem
-            temp_obj{j} = gmdistribution.fit(data,numGMM,'Options',options);
-            temp_min(j) = temp_obj{j}.NlogL;
+        if builtInFit == 1,
+            for  j = 1:Ngmm_reinit,     % EM is nonconvex, reinitialize
+                temp_obj = gmdistribution.fit(data,numGMM);
+                mutemp{j} = temp_obj.mu;
+                sigmatemp{j} = squeeze(temp_obj.Sigma);
+                wtemp{j} = temp_obj.PComponents;
+                ztemp{j} = cluster(temp_obj,data);
+                temp_min(j) = temp_obj.NlogL;
+                AICtemp(j) = temp_obj.AIC;
+            end
+        else
+            for  j = 1:Ngmm_reinit,     % EM is nonconvex, reinitialize
+                [mutemp{j},sigmatemp{j},wtemp{j},ztemp{j},temp_min(j), ...
+                        AICtemp(j)] = fitGMM(data,numGMM);
+            end
         end
         [~,I] = min(temp_min);
-        objGMM = temp_obj{I};
-        varargout{1} = objGMM.NlogL;
+        mu = mutemp{I};     sigma = sigmatemp{I};   wdist = wtemp{I};
+        idx = ztemp{I};     AIC = AICtemp(I);
+        varargout{1} = temp_min(I);
     otherwise
         % AIC Criteria fitting of GMM
         AIC = zeros(Ngmm_max,1);
-        for k = 1:Ngmm_max
-            for  j = 1:Ngmm_reinit,     % EM is nonconvex, reinitialize problem
-                try
-                    temp_obj{j} = gmdistribution.fit(data,k,'Options',options);
-                catch ME
-                    temp_obj{j} = gmdistribution.fit(data,k,'Options',options);
+        for k = 1:Ngmm_max,
+            if builtInFit == 1,
+                for  j = 1:Ngmm_reinit,
+                    temp_obj = gmdistribution.fit(data,k);
+                    mutemp{j} = temp_obj.mu;
+                    sigmatemp{j} = squeeze(temp_obj.Sigma);
+                    wtemp{j} = temp_obj.PComponents;
+                    ztemp{j} = cluster(temp_obj,data);
+                    temp_min(j) = temp_obj.NlogL;
+                    AICtemp(j) = temp_obj.AIC;
                 end
-                temp_min(j) = temp_obj{j}.NlogL;
+            else
+                for  j = 1:Ngmm_reinit,     % EM is nonconvex
+                    [mutemp{j},sigmatemp{j},wtemp{j},ztemp{j},temp_min(j), ...
+                        AICtemp(j)] = fitGMM(data,k);
+                end
             end
-            [~,I] = min(temp_min);
-            obj{k} = temp_obj{I};
-            AIC(k)= obj{k}.AIC;
+            [~,I] = min(temp_min);        muAIC{k} = mutemp{I};  
+            sigmaAIC{k} = sigmatemp{I};   wAIC{k} = wtemp{I};
+            zAIC{k} = ztemp{I};           AIC(k)= AICtemp(I);
         end
-        varargout{1} = AIC;    [~,I] = min(AIC);
-        objGMM = obj{I}; 
-        numGMM = I;
+        varargout{1} = AIC;   [~,I] = min(AIC);
+        mu = muAIC{I};        sigma = sigmaAIC{I};   
+        wdist = wAIC{I};      numGMM = I;
+        idx = zAIC{I};
 end
+varargout{2} = idx;
 
 % Adjust time vector for Markov model forcast
 if dt_forcast ~= 0,
@@ -154,11 +184,6 @@ end
 
 % ----- Compute Markov Transition Matrix -------------------------------
 
-% Cluster data to most likely GMM set
-% Generates interger vector with values [1,2,3] for each data point
-% indicating maximum likely distribution
-idx = cluster(objGMM,data(1:dVec:end));
-
 % Count transitions between distributions
 td= sparse(idx(1:end-1), idx(2:end), 1);    t = full(td);
 
@@ -169,7 +194,7 @@ M = t./repmat(sumRow,1,size(t,2));
 % ----- Display Results ------------------------------------------------
 % Plot AIC Criteria Decision
 if disp_AIC == 1 && length(varargout{1}) > 1,
-    figure;  plot(AIC);
+    figure;  plot(AIC); grid on;
     xlabel('Number of mixtures');   ylabel('AIC');
     title('GMM Fit via Akaike Information Criteria');
     hold on;
@@ -179,9 +204,6 @@ end
 
 % Plot GM Mixture Models and Complete GMM PDF
 if disp_GMMixture == 1,
-    mu = objGMM.mu;    sigmaVar = squeeze(objGMM.Sigma);
-    wdist = objGMM.PComponents;
-    
     x = linspace(min(data)*0.98,max(data)*1.02,10e3)';
     pdfPlot = zeros(length(x),numGMM + 1);  pdfTemp = zeros(length(x),1);
     leg_Data = cell(1,numGMM + 2);  leg_Data{1} = 'Data';
@@ -189,17 +211,17 @@ if disp_GMMixture == 1,
     
     figure;
     for j = 1:numGMM,
-        pdfPlot(:,j+1) = wdist(j)*pdf('norm',x,mu(j),sqrt(sigmaVar(j)));
+        pdfPlot(:,j+1) = wdist(j)*pdf('norm',x,mu(j),sqrt(sigma(j)));
         leg_Data{j+2} = num2str(j);   
-        leg_Data{j+2} = strcat('Dist. ',leg_Data{j+2});
+        leg_Data{j+2} = strcat('',leg_Data{j+2});
         pdfTemp = pdfTemp + pdfPlot(:,j+1);
     end
     pdfPlot(:,1) = pdfTemp;
     
-    [n,ybar] = hist(data);     b = bar(ybar,n,'hist'); hold on;
-    set(b,'FaceColor',[1 1 1]); area = sum(n)*(ybar(2) - ybar(1));
+    [n,ybar] = hist(data,100);     b = bar(ybar,n,'hist'); hold on;
+    set(b,'FaceColor',[1 1 1]);    area = sum(n)*(ybar(2) - ybar(1));
     
-    p = plot(x,area*pdfPlot(:,1),x,area*pdfPlot(:,2:end),'-.');             
+    p = plot(x,area*pdfPlot(:,1),x,area*pdfPlot(:,2:end),'-.'); grid on;        
     set(p,'LineWidth',1.5);
     legend(leg_Data,'FontSize',12)
     title('Gaussian Mixture Model Components','FontSize',15);
@@ -208,17 +230,33 @@ end
 
 % Plot Markov Transition Probabilities
 if disp_Markov == 1,
-    figure;  bar3(M);
+    figure;
+    imagesc(M);     colorbar;   colormap(gray);
     ylabel('Prior Distribution');   xlabel('Posteriori Distribution');
     zlabel('Transition Probability');
     title('Markov Chain Transmission Matrix');
 end
 
 % Plot Comparison between data and GMM data fit
-if disp_Compare == 1 && exist('nhist','file') == 2,
-   figure;
-   A.Data = data;   A.GMM = random(objGMM,10e3);
-   nhist(A);
-   ylabel('\phi(x) - PDF'); title('GMM PDF Fit Comparison');
+if disp_Compare == 1 && exist('nhist','file') == 2 && builtInFit == 1,
+    % Generate Fit Data for KS Density Comparison
+    numRand = length(data);
+    randIndex = randsample(1:length(wdist), numRand, true, wdist);
+    realization = mu(randIndex) + sqrt(sigma(randIndex)).*randn(numRand,1);
+    
+    figure;
+    % Histogram of Actual Data Vector
+    [f,xi] = hist(data,round(numRand/20));  b = bar(xi,f,'hist'); 
+    hold on;   set(b,'FaceColor',[1 1 1]);  area = sum(f)*(xi(2) - xi(1));
+    
+    % Compute Kernal Density of Data and GMM Fit
+    datafit = ksdensity(data,xi);   gmmfit = ksdensity(realization,xi);
+    
+    % Plot Results
+    p = plot(xi,area*datafit,xi,area*gmmfit,'-.'); grid on;        
+    set(p,'LineWidth',1.5);     legend('Data','Data PDF','GMM PDF');
+    title('GMM PDF Fit Comparison','FontSize',15);
+    ylabel('PDF - \phi(x)','FontSize',12); grid on;
 end
+
    
