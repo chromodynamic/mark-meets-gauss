@@ -1,4 +1,4 @@
-function [mu,sigma,wdist,iter,z,Pm_x] = fitGMM(vecIn,numGMM,varargin)
+function [mu,sigma,wdist,varargout] = fitGMM(vecIn,numGMM,varargin)
 % fitGMM.m - EM algorithm for parameter estimation of 1d GMM
 % 
 % Given a 1d vector of data, the expectation-maximization (EM) algorithm
@@ -17,9 +17,11 @@ function [mu,sigma,wdist,iter,z,Pm_x] = fitGMM(vecIn,numGMM,varargin)
 %       mu              - mean of each cluster
 %       sigma           - variance of each cluster
 %       wdist           - probability weights of each Gaussian mixture
-%       iter            - number of iterations for convergence
 %       z               - MAP classification of data vector given GMM
+%       Q               - converged negative log likelihood function
+%       AIC             - Akaike information criterion for fit
 %       Pm_x            - soft classification, probability of cluster
+%       iter            - number of iterations for convergence
 %
 % Written by: Jonathan LeSage - jrlesage@gmail.com
 % University of Texas at Austin - Department of Mechanical Engineering
@@ -75,10 +77,8 @@ iter = 0;  % Iteration counter
 dStep = minEp;
 
 % ----- Iterative EM Algorithm ------------------------------------------
+Q = 0;
 while (iter < maxIter && dStep >= minEp),
-   
-    % Temporary storage of old values
-    mu0 = mu;  sigma0 = sigma;    wdist0 = wdist;
     Pm_x = zeros(M,numGMM);
     
     % Estimation-step - via Bayes rule
@@ -98,11 +98,24 @@ while (iter < maxIter && dStep >= minEp),
     muMat = repmat(mu',M,1);
     sigma = (sum(Pm_x.*(dataVec - muMat).^2)./sum(Pm_x))';
     
+    % Compute the Maximized Likelihood Function, Q
+    Qvec = zeros(M,1);  Qprior = Q;
+    for j = 1:numGMM,
+        tempDist = 1/sqrt(2*pi*sigma(j))*exp(-(vecIn-mu(j)).^2/(2*sigma(j)));
+        tempDist(tempDist == 0) = 1e-6;
+        Qvec = Qvec + wdist(j)*tempDist;
+    end
+    Q = -sum(log(Qvec));
+    
     % Update exit conditions
     iter = iter + 1;
-    dStep = norm(mu0-mu) + norm(sigma0-sigma) + norm(wdist0 - wdist);
+    dStep = abs(Qprior - Q);
+
 end
 [~,z] = max(Pm_x,[],2);     % Maximum a posteriori classification of data
+
+AIC = 2*(3*numGMM - 1) + 2*abs(Q);
+varargout = {z,Q,AIC,iter,Pm_x};
 
 % ---- Graphically Illustrate GMM Fit -----------------------------------
 if dispRes == 1,
